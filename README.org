@@ -1,0 +1,132 @@
+#+TITLE: database-core.asd
+
+* Database Core
+This library provides a few different ways of interfacing to
+postgresql and managing connections. 
+
+** Connection
+To simplify use of a database connection as much as possible, and to
+provide places to hook in to run extra code in response to database
+access, I have made this simple database access wrapper.
+
+Originally it wrapped the [[https://quickref.common-lisp.net/pg.html][pg.asd]] library, but it has since been
+switched to using cl-postgres. That's why it implements methods with
+names like ~pg-connect~ and ~pg-exec~. 
+
+It relies on configuration.asd to get database connection
+parameters. That means that, in a lisp application you can just set
+the database connection parameters once and do the following:-
+
+#+begin_src lisp
+(with-database
+  (dquery "select * from some_table"))
+
+#+end_src
+
+Although, since there is a #'pg-exec implementation for NIL as a
+connection, you don't even need the ~with-database~ form. This isn't
+usually a good idea, as it would establish a new database connection
+for each query. It's useful for interactive tests via SLIME though.
+
+** dquery
+The most basic facility, used almost everywhere else, is a function
+#'dquery which is just a thin wrapper around #'pg-exec from pg.asd,
+which has now been reimplemented in terms of cl-postgres.asd
+
+** db-assert, db-delete etc
+Do db inserts using s-expression. It takes care of escaping SQL
+literals and table names. Hyphens in tables and columns map to
+underscores. Table and column names are lowercased. 
+
+#+begin_src lisp
+(db-assert `(table :column1 "value" :column2 123))
+
+;; This assumes the table has a column called 'id' which is a numeric auto incrementing vaule
+(dquery "create table foo (id bigserial primary key, name text not null);")
+(db-create `(foo :name "Meta variable"))
+;; -> id of the newly created row
+
+(db-delete `(foo :id 1))
+(db-delete `(foo :name "blah"))
+
+#+end_src
+
+** sql-loop
+sql-loop is a macro which wraps the CL ~loop~ macro to provide
+database queries in a datalog like format notated in s-expressions.
+
+#+begin_src lisp
+(in-package :database-core)
+
+(sql-loop (id1 id2 name)
+    `((company :id id1 :name name)
+      (company :id id2 :name name :id (> id1)))
+  collect (list id1 id2 name))
+#+end_src
+
+... which I think is clearer than
+
+#+begin_src sql
+SELECT company.id AS id1,
+       ttt_0.id AS id2,
+       ttt_0.name AS name 
+FROM   company AS ttt_0,
+       company 
+WHERE  ttt_0.id > company.id
+  AND  ttt_0.name=company.name
+#+end_src
+
+The sql-loop macro will generate unique names for each table, escape
+table and column names (slightly over zealously!).
+
+Or: find every company which hasn't placed an order in 2020 for
+widgets.
+
+#+begin_src lisp
+(sql-loop (id name)
+    `((company :id id :name name)
+      (:not (order :company id :date (>= "2020-01-01")
+                   :date (< "2021-01-01")
+                   :id order-id)
+            (order-item :order order-id :product prod)
+            (product :id prod :name "Widget")))
+  collect (list id name))
+#+end_src
+
+Which solves the following query (I've stripped out the unneeded
+double quotes):-
+
+#+begin_src sql
+SELECT company.id AS id,
+       company.name AS name 
+FROM   company 
+WHERE  NOT EXISTS (
+SELECT * 
+FROM   order_item AS ttt_1,
+       order AS ttt_0,
+       product AS ttt_2 
+WHERE  ttt_0.date >= $$2020-01-01$$
+  AND  ttt_0.date < $$2021-01-01$$
+  AND  ttt_2.name=$$Widget$$
+  AND  ttt_0.company=company.id
+  AND  ttt_2.id=ttt_1.product
+  AND  ttt_1.order=ttt_0.id)
+#+end_src
+
+* Quick Start
+
+#+begin_src lisp
+
+;; set the connection parameters
+(setf (configuration:configuration-parameter :database/host) "database-host.local"
+      (configuration:configuration-parameter :database/name) "mydb"
+      (configuration:configuration-parameter :database/user) "me"
+      (configuration:configuration-parameter :database/password) "top-secret")
+
+(dquery "create table foo (id bigserial primary key, name text not null);")
+(db-create `(foo :name "Meta variable"))
+  
+
+  #+end_src
+  
+  #+end_srcl#+begin_src 
